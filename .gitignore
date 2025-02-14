@@ -4,8 +4,6 @@
 
 *.pdf
 
-family-budget-397209-3c287def2b7d.json
-
 # History files
 .Rhistory
 .Rapp.history
@@ -55,4 +53,3 @@ po/*~
 
 # RStudio Connect folder
 rsconnect/
-family-budget-397209-3c287def2b7d.json
