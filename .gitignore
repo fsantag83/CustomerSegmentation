@@ -9,8 +9,10 @@
 *.Rapp.history
 
 # Session Data files
+*.rds
 *.RData
 *.RDataTmp
+/Data
 
 # User-specific files
 .Ruserdata
