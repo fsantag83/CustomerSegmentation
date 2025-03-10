@@ -1,0 +1,91 @@
+---
+title: ""
+author: ""
+date: ""
+format:
+  beamer:
+    theme: "default"
+    colortheme: "default"
+    title-slide: false
+    header-includes:
+      - |
+        \setbeamertemplate{title page}{}
+      - |
+        \setbeamertemplate{footline}{%
+          \ifnum\insertframenumber>1
+            \leavevmode%
+            \hbox{%
+              \begin{beamercolorbox}[wd=0.5\paperwidth,ht=2.25ex,dp=1ex,left]{author in head/foot}%
+                \hspace*{0.5em}\includegraphics[height=0.6cm]{Images/logo1.png}%
+              \end{beamercolorbox}%
+              \begin{beamercolorbox}[wd=0.5\paperwidth,ht=2.25ex,dp=1ex,right]{date in head/foot}%
+                \includegraphics[height=0.6cm]{Images/logo2.png}\hspace*{0.5em}%
+              \end{beamercolorbox}%
+            }%
+            \vskip0pt%
+          \fi
+        }
+execute:
+  mermaid: true
+lang: es
+---
+
+# 
+
+![](Images/cover_image.jpg){width="100%"}
+
+# **Resumen Ejecutivo**
+
+Este slide deck presenta los resultados de la segmentación de riesgo SARLAFT, obtenida a partir de la integración de datos, el pre-procesamiento, y el análisis de conglomerados (**clustering**). Se identificaron clústers con perfiles de riesgo diferenciados.
+
+# **Objetivo**
+
+Implementar una metodología de segmentación de contrapartes tales como asociados y proveedores. Analizando información de diversos **Factores riesgo** de SARLAFT:
+
+-   **Clientes:** Actividad económica, transacciones, ingresos, egresos, y patrimonio.
+-   **Productos:** Características y nicho de mercado.
+-   **Canales de distribución:** Tipología y características.
+-   **Jurisdicciones:** Ubicación y riesgos.
+
+# **Enfoques de la segmentación**
+
+|  |  |  |
+|--------------------------|-----------------------|-----------------------|
+| **TIPO** | **Comportamental** | **Predictivo** |
+| -------------------------- | ----------------------- | ----------------------- |
+| **¿QUÉ ES?** | Dividir a las contrapartes en grupos | Asignar a las contrapartes a un grupo específico |
+| -------------------------- | ----------------------- | ----------------------- |
+| **¿PARA QUÉ SIRVE?** | Agrupamiento | Predicción |
+| -------------------------- | ----------------------- | ----------------------- |
+| **¿CÓMO SE HACE?** | Algoritmo de agrupación | Algoritmo de clasificación |
+| -------------------------- | ----------------------- | ----------------------- |
+| **¿CUÁNDO SE DEBERÍA USAR?** | Descubrir segmentos desconocidos | Predecir a cuál segmento pertenece |
+
+# **Método de segmentación**
+
+![](Images/method.jpg){width="100%"}
+
+# **Proceso de Análisis**
+
+![center](Images/diagram.png){width="100%"}
+
+# **Proceso de Análisis**
+
+-   **Transformación Box-Cox**: Se ajustan variables numéricas (desde Activos hasta Num. Trans.) para corregir asimetrías.
+-   **PCA**: Se reduce la dimensionalidad con componentes principales.
+-   **Comparación métodos de agrupación**: Se evalúan métodos: jerárquicos, de k-medias, pam y clara; mediante medidas internas, tales como la conectividad, el coeficiente de silueta (silhouette) y el indice de Dunn y se selecciona(n) el(los) algoritmos óptimos.
+-   **Análisis de Estabilidad**: Se analiza la robustez de cada solución óptima con bootstrap y se calcula el coeficiente **Jaccard** .
+-   **Selección**: Se opta el método más completo en términos de validación interna y estabilidad.
+-   **Segmentación**: Se ejecuta el método de clustering seleccionado.
+
+# **Entendimiento de Datos**
+
+**Periodo de tiempo**: Desde 2023-01-01 hasta 2024-12-31
+
+|  |  |  |
+|--------------------------|-----------------------|-----------------------|
+| **DATOS** | **Inicial** | **Modelo** |
+| -------------------------- | ----------------------- | ----------------------- |
+| **ID Asociados** | 3.851 | 2.534* | 
+| -------------------------- | ----------------------- | ----------------------- |
+| **Transacciones** | 512.487 | 482.399* |
