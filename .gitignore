@@ -1,3 +1,15 @@
+# Ignore
+*.DS_Store
+
+# Ignore large files and sensitive data
+*.duckdb
+*.xlsx
+
+# Ignore outputs and logs
+Clients/*/Results/*
+*.Rhistory
+*.Rproj.user/
+
 *.log
 
 *.xlsx
