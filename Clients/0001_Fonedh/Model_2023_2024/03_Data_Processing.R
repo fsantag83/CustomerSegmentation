@@ -2,15 +2,18 @@
 base::rm(list = base::ls())
 
 # Set seed for reproducibility
-set.seed(444)
+base::set.seed(444)
 
 # Ensure required packages are installed
-required_pkgs <- c("magrittr", "tidyverse", "FactoMineR", "factoextra", "cluster", "car", "fpc", "ggpubr", "plotrix", "writexl", "fmsb", "clValid")
+required_pkgs <- c("magrittr", "tidyverse", "FactoMineR", "factoextra", "cluster", 
+                   "car", "fpc", "ggpubr", "plotrix", "writexl", "fmsb", "clValid", 
+                   "DBI", "duckdb")  # Added DBI and duckdb packages
 install_if_missing <- function(pkg) {
-  if (!requireNamespace(pkg, quietly = TRUE)) base::install.packages(pkg, dependencies = TRUE)
+  if (!base::requireNamespace(pkg, quietly = TRUE)) 
+    utils::install.packages(pkg, dependencies = TRUE)
 }
-invisible(lapply(required_pkgs, install_if_missing))
-sapply(required_pkgs, require, character = TRUE)
+base::invisible(base::lapply(required_pkgs, install_if_missing))
+base::sapply(required_pkgs, require, character.only = TRUE)
 base::rm(install_if_missing, required_pkgs)
 
 # Define color palette function
@@ -19,8 +22,40 @@ gg_color <- function(n) {
   grDevices::hcl(h = hues, l = 65, c = 100)[1:n]
 }
 
+# Define organization and database path
+org_id <- "0001_Fonedh"
+gold_path <- base::file.path("Data", "Gold", org_id, "Model_2023_2024", paste0(org_id, ".duckdb"))
+
+
+# Connect to Gold database with proper error handling
+con <- base::tryCatch({
+  DBI::dbConnect(
+    duckdb::duckdb(),
+    dbdir = gold_path,
+    config = base::list(threads = "4", memory_limit = "8GB"),
+    read_only = TRUE   # Read-only mode for analytics
+  )
+}, error = function(e) {
+  base::message(glue::glue("Failed to connect to {gold_path}: {e$message}"))
+  base::stop("Database connection error")
+})
+
 # 1. Read processed affiliates data
-affiliates <- base::readRDS("Data/affiliates.rds")
+base::tryCatch({
+  affiliates <- DBI::dbGetQuery(con, "SELECT * FROM gold_affiliates")
+  base::message(glue::glue("Successfully loaded {base::nrow(affiliates)} affiliates"))
+}, error = function(e) {
+  base::message(glue::glue("Failed to query gold_affiliates: {e$message}"))
+  base::stop("Data query error")
+}, finally = {
+  # Always close the connection (executes regardless of success/error)
+  if (DBI::dbIsValid(con)) {
+    DBI::dbDisconnect(con, shutdown = TRUE)
+    base::message("Database connection closed")
+  }
+})
+
+base::rm(con,gold_path,org_id)
 
 # 2. Copy dataset for transformation
 affiliates_t <- affiliates
