@@ -1,3 +1,7 @@
+# ========================================================================
+# ORGANIZATION 1: FONEDH - MS EXCEL FILE PROCESSING
+# ========================================================================
+
 # Bronze Layer Initialization Script
 
 # Clean environment
@@ -169,4 +173,294 @@ base::message(glue::glue("Bronze layer contains tables: {base::toString(tables)}
 # Cleanup
 DBI::dbDisconnect(con, shutdown = TRUE)
 base::message("Bronze layer initialization complete")
+base::rm(list = base::ls())
+
+
+# ========================================================================
+# ORGANIZATION 2: COOPCENTRAL - PIPE-DELIMITED TEXT FILE PROCESSING
+# ========================================================================
+
+# Required packages for text file processing
+if (!base::requireNamespace("data.table", quietly = TRUE)) utils::install.packages("data.table")
+if (!base::requireNamespace("lubridate", quietly = TRUE)) utils::install.packages("lubridate")
+if (!base::requireNamespace("stringr", quietly = TRUE)) utils::install.packages("stringr")
+
+# Define organization ID and paths
+org_id_2 <- "0002_Coopcentral"
+bronze_dir_2 <- base::file.path("Data", "Bronze", org_id_2, "Model_2022_2023_2024")
+bronze_db_2 <- base::file.path(bronze_dir_2, paste0(org_id_2, ".duckdb"))
+
+# Create Bronze directory structure
+if (!base::dir.exists(bronze_dir_2)) {
+  base::dir.create(bronze_dir_2, recursive = TRUE, mode = "0755")
+  base::message(glue::glue("Created Bronze directory: {bronze_dir_2}"))
+}
+
+# Initialize DuckDB connection
+con_2 <- DBI::dbConnect(
+  duckdb::duckdb(),
+  dbdir = bronze_db_2,
+  config = base::list(
+    memory_limit = "8GB",
+    threads = "4"
+  ),
+  read_only = FALSE
+)
+
+# Extract year from filename
+extract_year <- function(filename) {
+  year_pattern <- stringr::str_extract(filename, "20(22|23|24)")
+  return(base::ifelse(base::is.na(year_pattern), "", year_pattern))
+}
+
+# Create schema-specific client table
+DBI::dbExecute(con_2, "DROP TABLE IF EXISTS bronze_clientes")
+DBI::dbExecute(con_2, "
+  CREATE TABLE bronze_clientes (
+    oficina VARCHAR,
+    tipo_documento VARCHAR,
+    documento VARCHAR,
+    ciiu VARCHAR,
+    ocupacion VARCHAR,
+    ingresos_mens DOUBLE,
+    egresos_mens DOUBLE, 
+    otros_ingresos DOUBLE,
+    total_activos DOUBLE,
+    total_pasivos DOUBLE,
+    valor_patrimoni DOUBLE,
+    estado VARCHAR,
+    source_file VARCHAR,
+    year VARCHAR
+  )
+")
+
+# Create schema-specific transaction table
+DBI::dbExecute(con_2, "DROP TABLE IF EXISTS bronze_movimientos")
+DBI::dbExecute(con_2, "
+  CREATE TABLE bronze_movimientos (
+    num_ident VARCHAR,
+    fecha_transac DATE,
+    tipo_transac VARCHAR,
+    tipo_prod VARCHAR,
+    tipo_canal VARCHAR,
+    jurisdiccion VARCHAR,
+    monto DOUBLE,
+    especie VARCHAR,
+    nombre_prod VARCHAR,
+    source_file VARCHAR,
+    year VARCHAR,
+    transaction_type VARCHAR
+  )
+")
+
+
+# Process client files with explicit schema
+load_client_file <- function(file_path) {
+  file_name <- base::basename(file_path)
+  year <- extract_year(file_name)
+  
+  tryCatch({
+    # First read just the headers to get exact column names
+    headers <- data.table::fread(
+      file_path,
+      sep = "|",
+      nrows = 0,
+      header = TRUE
+    )
+    actual_col_names <- base::names(headers)
+    
+    # Build column selection part first
+    col_selections <- base::paste0(
+      '"', actual_col_names[1], '" AS oficina, ',
+      '"', actual_col_names[2], '" AS tipo_documento, ',
+      '"', actual_col_names[3], '" AS documento, ',
+      '"', actual_col_names[4], '" AS ciiu, ',
+      '"', actual_col_names[5], '" AS ocupacion, ',
+      'TRY_CAST("', actual_col_names[6], '" AS DOUBLE) AS ingresos_mens, ',
+      'TRY_CAST("', actual_col_names[7], '" AS DOUBLE) AS egresos_mens, ',
+      'TRY_CAST("', actual_col_names[8], '" AS DOUBLE) AS otros_ingresos, ',
+      'TRY_CAST("', actual_col_names[9], '" AS DOUBLE) AS total_activos, ',
+      'TRY_CAST("', actual_col_names[10], '" AS DOUBLE) AS total_pasivos, ',
+      'TRY_CAST("', actual_col_names[11], '" AS DOUBLE) AS valor_patrimoni, ',
+      '"', actual_col_names[12], '" AS estado'
+    )
+    
+    # Create final query with standard glue
+    query <- glue::glue("
+      INSERT INTO bronze_clientes 
+      SELECT 
+        {col_selections},
+        '{file_name}' AS source_file,
+        '{year}' AS year
+      FROM read_csv_auto(
+        '{file_path}', 
+        delim='|', 
+        header=true, 
+        skip=0,
+        all_varchar=true,
+        ignore_errors=true
+      )
+    ")
+    
+    DBI::dbExecute(con_2, query)
+    base::message(glue::glue("Loaded client data from {file_name}"))
+    
+  }, error = function(e) {
+    base::message(glue::glue("Error processing client file {file_name}: {e$message}"))
+    
+    # Alternative direct approach without SQL
+    tryCatch({
+      # Read data using data.table
+      df <- data.table::fread(
+        file_path,
+        sep = "|",
+        header = TRUE,
+        colClasses = "character",
+        encoding = "UTF-8",
+        data.table = FALSE
+      )
+      
+      # Create a mapping of existing columns to desired columns
+      if (base::ncol(df) >= 12) {
+        result <- base::data.frame(
+          oficina = df[[1]],
+          tipo_documento = df[[2]],
+          documento = df[[3]],
+          ciiu = df[[4]],
+          ocupacion = df[[5]],
+          ingresos_mens = base::suppressWarnings(base::as.numeric(df[[6]])),
+          egresos_mens = base::suppressWarnings(base::as.numeric(df[[7]])),
+          otros_ingresos = base::suppressWarnings(base::as.numeric(df[[8]])),
+          total_activos = base::suppressWarnings(base::as.numeric(df[[9]])),
+          total_pasivos = base::suppressWarnings(base::as.numeric(df[[10]])),
+          valor_patrimoni = base::suppressWarnings(base::as.numeric(df[[11]])),
+          estado = df[[12]],
+          source_file = file_name,
+          year = year
+        )
+        
+        # Write directly to database
+        DBI::dbWriteTable(con_2, "bronze_clientes", result, append = TRUE)
+        base::message(glue::glue("Loaded client data from {file_name} using direct method"))
+      } else {
+        base::message(glue::glue("File {file_name} has insufficient columns: {base::ncol(df)} found, 12+ needed"))
+      }
+    }, error = function(e2) {
+      base::message(glue::glue("All import methods failed for {file_name}: {e2$message}"))
+    })
+  })
+}
+
+# Process transaction files with explicit schema
+load_transaction_file <- function(file_path) {
+  file_name <- base::basename(file_path)
+  year <- extract_year(file_name)
+  tx_type <- stringr::str_extract(file_name, "^[^_]+")
+  
+  tryCatch({
+    # Use DuckDB's native CSV reader with safe conversions
+    query <- glue::glue("
+    INSERT INTO bronze_movimientos
+    SELECT 
+      CAST(num_ident AS VARCHAR),
+      TRY_STRPTIME(fecha_transac, '%d/%m/%Y'),
+      CAST(tipo_transac AS VARCHAR),
+      CAST(tipo_prod AS VARCHAR),
+      CAST(tipo_canal AS VARCHAR),
+      CAST(jurisdiccion AS VARCHAR),
+      TRY_CAST(monto AS DOUBLE),
+      CAST(especie AS VARCHAR),
+      CAST(nombre_prod AS VARCHAR),
+      '{file_name}' AS source_file,
+      '{year}' AS year,
+      '{tx_type}' AS transaction_type
+    FROM read_csv_auto(
+      '{file_path}', 
+      delim='|', 
+      header=true, 
+      nullstr='',
+      auto_detect=true,
+      sample_size=1000,
+      all_varchar=true
+    )
+  ")
+    
+    DBI::dbExecute(con_2, query)
+    base::message(glue::glue("Loaded transaction data from {file_name}"))
+    
+  }, error = function(e) {
+    base::message(glue::glue("Error processing transaction file {file_name}: {e$message}"))
+    
+    # Fallback method for problematic files
+    tryCatch({
+      # Try with relaxed settings
+      fallback_query <- glue::glue("
+       PRAGMA copy_atomicity='statement';
+       PRAGMA ignore_errors_in_dates=true;
+        
+       INSERT INTO bronze_movimientos
+       SELECT 
+         CAST(c1 AS VARCHAR) AS num_ident,
+         NULL AS fecha_transac,
+         CAST(c3 AS VARCHAR) AS tipo_transac,
+         CAST(c4 AS VARCHAR) AS tipo_prod,
+         CAST(c5 AS VARCHAR) AS tipo_canal,
+         CAST(c6 AS VARCHAR) AS jurisdiccion,
+         TRY_CAST(c7 AS DOUBLE) AS monto,
+         CAST(c8 AS VARCHAR) AS especie,
+         CAST(c9 AS VARCHAR) AS nombre_prod,
+         '{file_name}' AS source_file,
+         '{year}' AS year,
+         '{tx_type}' AS transaction_type
+       FROM read_csv(
+         '{file_path}', 
+         delim='|', 
+         header=true,
+         columns={'c1': 'VARCHAR', 'c2': 'VARCHAR', 'c3': 'VARCHAR', 'c4': 'VARCHAR',
+                  'c5': 'VARCHAR', 'c6': 'VARCHAR', 'c7': 'VARCHAR', 'c8': 'VARCHAR',
+                  'c9': 'VARCHAR'},
+         null_padding=true,
+         ignore_errors=true
+      )
+  ")
+      
+      DBI::dbExecute(con_2, fallback_query)
+      base::message(glue::glue("Loaded transaction data from {file_name} using fallback method"))
+    }, error = function(e2) {
+      base::message(glue::glue("Fallback import failed for {file_name}: {e2$message}"))
+    })
+  })
+}
+
+# Get all text files
+txt_files <- base::list.files(
+  path = bronze_dir_2,
+  pattern = "\\.txt$",
+  full.names = TRUE
+)
+
+base::message(glue::glue("Found {base::length(txt_files)} text files to process"))
+
+# Process each file based on its type
+for (file in txt_files) {
+  file_name <- base::basename(file)
+  
+  # Identify file type
+  if (base::grepl("Base Clientes", file_name)) {
+    load_client_file(file)
+  } else {
+    load_transaction_file(file)
+  }
+}
+
+# Check results
+cliente_count <- DBI::dbGetQuery(con_2, "SELECT COUNT(*) FROM bronze_clientes")
+movimiento_count <- DBI::dbGetQuery(con_2, "SELECT COUNT(*) FROM bronze_movimientos")
+
+base::message(glue::glue("Loaded {cliente_count} client records"))
+base::message(glue::glue("Loaded {movimiento_count} transaction records"))
+
+# Close connection
+DBI::dbDisconnect(con_2, shutdown = TRUE)
+base::message(glue::glue("Bronze layer for {org_id_2} complete"))
 base::rm(list = base::ls())
