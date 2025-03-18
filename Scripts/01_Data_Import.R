@@ -1,4 +1,303 @@
 # ========================================================================
+# ORGANIZATION 0: LAFT CRIMES - MS EXCEL FILES: CRIME AND POPULATION DATA
+# ========================================================================
+
+# Clear environment
+base::rm(list = base::ls())
+
+# Load required packages with explicit namespaces
+required_pkgs <- c("DBI", "duckdb", "readxl", "dplyr", "glue", "stringr")
+install_if_missing <- function(pkg) {
+  if (!base::requireNamespace(pkg, quietly = TRUE)) utils::install.packages(pkg)
+}
+base::invisible(base::lapply(required_pkgs, install_if_missing))
+base::sapply(required_pkgs, require, character.only = TRUE)
+base::rm(install_if_missing, required_pkgs)
+
+# Define organization ID and paths
+org_id_laft <- "0000_CrimesLAFT"
+bronze_dir_laft <- base::file.path("Data", "Bronze", org_id_laft, "2022_2023_2024")
+bronze_db_laft <- base::file.path(bronze_dir_laft, paste0(org_id_laft, ".duckdb"))
+
+# Create Bronze directory structure if it doesn't exist
+if (!base::dir.exists(bronze_dir_laft)) {
+  base::dir.create(bronze_dir_laft, recursive = TRUE, mode = "0755")
+  base::message(glue::glue("Created Bronze directory: {bronze_dir_laft}"))
+}
+
+# Initialize DuckDB connection
+con_laft <- DBI::dbConnect(
+  duckdb::duckdb(),
+  dbdir = bronze_db_laft,
+  config = base::list(
+    memory_limit = "8GB",
+    threads = "4"
+  ),
+  read_only = FALSE
+)
+
+# Define schema for crimes table
+DBI::dbExecute(con_laft, "DROP TABLE IF EXISTS bronze_crimes")
+DBI::dbExecute(con_laft, "
+  CREATE TABLE bronze_crimes (
+    armas_medios VARCHAR,
+    departamento VARCHAR,
+    municipio VARCHAR,
+    fecha DATE,
+    codigo_dane VARCHAR,
+    cantidad INTEGER,
+    source_file VARCHAR,
+    year VARCHAR
+  )
+")
+
+# Define schema for population table
+DBI::dbExecute(con_laft, "DROP TABLE IF EXISTS bronze_population")
+DBI::dbExecute(con_laft, "
+  CREATE TABLE bronze_population (
+    cod_dpto VARCHAR,
+    departamento VARCHAR,
+    cod_dpto_mpio VARCHAR,
+    municipio VARCHAR,
+    anio INTEGER,
+    area_geografica VARCHAR,
+    total INTEGER,
+    source_file VARCHAR,
+    year VARCHAR
+  )
+")
+
+# Function to extract year from filename
+extract_year_laft <- function(filename) {
+  year_pattern <- stringr::str_extract(filename, "20(22|23|24)")
+  return(base::ifelse(base::is.na(year_pattern), "", year_pattern))
+}
+
+# Function to load crimes data from Excel files
+load_crimes_excel <- function(file_path) {
+  file_name <- base::basename(file_path)
+  year <- extract_year_laft(file_name)
+  
+  tryCatch({
+    # Read data starting from row 10 (with column names)
+    crimes_data <- readxl::read_excel(
+      file_path,
+      skip = 9,  # Skip 9 rows to start at row 10
+      col_types = c(
+        "text",    # ARMAS_MEDIOS
+        "text",    # DEPARTAMENTO
+        "text",    # MUNICIPIO
+        "date",    # FECHA (dd.mm.yyyy)
+        "text",    # CODIGO_DANE
+        "numeric"  # CANTIDAD
+      )
+    )
+    
+    # Ensure columns have the correct names
+    base::names(crimes_data) <- c(
+      "armas_medios", "departamento", "municipio", 
+      "fecha", "codigo_dane", "cantidad"
+    )
+    
+    # Add source file and year
+    crimes_data <- crimes_data |>
+      dplyr::mutate(
+        source_file = file_name,
+        year = year
+      )
+    
+    # Write to DuckDB
+    DBI::dbAppendTable(con_laft, "bronze_crimes", crimes_data)
+    base::message(glue::glue("Processed crimes file: {file_name}"))
+    
+  }, error = function(e) {
+    base::message(glue::glue("Error processing crime file {file_name}: {e$message}"))
+    
+    # Fallback method with more explicit control
+    tryCatch({
+      # Read raw data with custom settings
+      df_raw <- readxl::read_excel(
+        file_path,
+        skip = 9,
+        col_names = FALSE,
+        col_types = "text"
+      )
+      
+      # Manually create the dataframe with correct types
+      crimes_df <- base::data.frame(
+        armas_medios = base::as.character(df_raw[[1]]),
+        departamento = base::as.character(df_raw[[2]]),
+        municipio = base::as.character(df_raw[[3]]),
+        fecha = base::as.Date(df_raw[[4]], format = "%d.%m.%Y"),
+        codigo_dane = base::as.character(df_raw[[5]]),
+        cantidad = base::suppressWarnings(base::as.integer(df_raw[[6]])),
+        source_file = file_name,
+        year = year
+      )
+      
+      # Write to database
+      DBI::dbAppendTable(con_laft, "bronze_crimes", crimes_df)
+      base::message(glue::glue("Processed crimes file using fallback method: {file_name}"))
+      
+    }, error = function(e2) {
+      base::message(glue::glue("All methods failed for crimes file {file_name}: {e2$message}"))
+    })
+  })
+}
+
+# Function to load population data from Excel files
+load_population_excel <- function(file_path) {
+  file_name <- base::basename(file_path)
+  year <- extract_year_laft(file_name)
+  
+  tryCatch({
+    # Read data starting from row 12 (with column names)
+    population_data <- readxl::read_excel(
+      file_path,
+      skip = 11,
+      col_names = TRUE,
+      col_types = c("text", "text", "text", "text", "numeric", "text", "numeric", 
+                    "guess", "guess", "guess", "guess", "guess", "guess")
+    )
+    
+    
+    # Select just the needed columns (A to G)
+    population_data <- population_data[, 1:7]
+    
+    # Ensure columns have the correct names
+    base::names(population_data) <- c(
+      "cod_dpto", "departamento", "cod_dpto_mpio", 
+      "municipio", "anio", "area_geografica", "total"
+    )
+    
+    # Add source file and year
+    population_data <- population_data |>
+      dplyr::mutate(
+        source_file = file_name,
+        year = year
+      )
+    
+    # Write to DuckDB
+    DBI::dbAppendTable(con_laft, "bronze_population", population_data)
+    base::message(glue::glue("Processed population file: {file_name}"))
+    
+  }, error = function(e) {
+    base::message(glue::glue("Error processing population file {file_name}: {e$message}"))
+    
+    # Fallback method with more explicit control
+    tryCatch({
+      # Read raw data with custom settings
+      df_raw <- readxl::read_excel(
+        file_path,
+        skip = 11,
+        col_names = FALSE,
+        col_types = "text",
+        n_max = 1122  # Prevent reading beyond data area
+      )
+      
+      # Manually create the dataframe with correct types
+      pop_df <- base::data.frame(
+        cod_dpto = base::as.character(df_raw[[1]]),
+        departamento = base::as.character(df_raw[[2]]),
+        cod_dpto_mpio = base::as.character(df_raw[[3]]),
+        municipio = base::as.character(df_raw[[4]]),
+        anio = base::suppressWarnings(base::as.integer(df_raw[[5]])),
+        area_geografica = base::as.character(df_raw[[6]]),
+        total = base::suppressWarnings(base::as.integer(df_raw[[7]])),
+        source_file = file_name,
+        year = year
+      )
+      
+      # Write to database
+      DBI::dbAppendTable(con_laft, "bronze_population", pop_df)
+      base::message(glue::glue("Processed population file using fallback method: {file_name}"))
+      
+    }, error = function(e2) {
+      base::message(glue::glue("All methods failed for population file {file_name}: {e2$message}"))
+    })
+  })
+}
+
+# Get all crime Excel files
+crimes_files <- base::list.files(
+  path = base::file.path(bronze_dir_laft, "Crimes"),
+  pattern = "\\.xlsx$",
+  full.names = TRUE
+)
+
+base::message(glue::glue("Found {base::length(crimes_files)} crime Excel files to process"))
+
+# Process all crime files
+base::invisible(base::lapply(crimes_files, load_crimes_excel))
+
+# Get all population Excel files
+population_files <- base::list.files(
+  path = base::file.path(bronze_dir_laft, "Population"),
+  pattern = "\\.xlsx$",
+  full.names = TRUE
+)
+
+base::message(glue::glue("Found {base::length(population_files)} population Excel files to process"))
+
+# Process all population files
+base::invisible(base::lapply(population_files, load_population_excel))
+
+# After processing all crime files but before creating indexes
+
+# Delete NA department rows from crimes
+base::message("Deleting rows with NA departments from crimes...")
+DBI::dbExecute(con_laft, "DELETE FROM bronze_crimes WHERE departamento IS NULL")
+base::message("Remaining crime records:", 
+              DBI::dbGetQuery(con_laft, "SELECT COUNT(*) FROM bronze_crimes")$count)
+
+# Create indexes for better performance
+DBI::dbExecute(con_laft, "CREATE INDEX IF NOT EXISTS idx_crimes_departamento ON bronze_crimes(departamento)")
+DBI::dbExecute(con_laft, "CREATE INDEX IF NOT EXISTS idx_crimes_municipio ON bronze_crimes(municipio)")
+DBI::dbExecute(con_laft, "CREATE INDEX IF NOT EXISTS idx_crimes_fecha ON bronze_crimes(fecha)")
+DBI::dbExecute(con_laft, "CREATE INDEX IF NOT EXISTS idx_crimes_codigo_dane ON bronze_crimes(codigo_dane)")
+
+DBI::dbExecute(con_laft, "CREATE INDEX IF NOT EXISTS idx_population_cod_dpto ON bronze_population(cod_dpto)")
+DBI::dbExecute(con_laft, "CREATE INDEX IF NOT EXISTS idx_population_cod_dpto_mpio ON bronze_population(cod_dpto_mpio)")
+DBI::dbExecute(con_laft, "CREATE INDEX IF NOT EXISTS idx_population_anio ON bronze_population(anio)")
+
+# Check results
+crimes_count <- DBI::dbGetQuery(con_laft, "SELECT COUNT(*) FROM bronze_crimes")
+population_count <- DBI::dbGetQuery(con_laft, "SELECT COUNT(*) FROM bronze_population")
+
+base::message(glue::glue("Loaded {crimes_count} crime records"))
+base::message(glue::glue("Loaded {population_count} population records"))
+
+# Verify data quality with sample counts by department
+dept_crime_counts <- DBI::dbGetQuery(con_laft, "
+  SELECT departamento, COUNT(*) as record_count 
+  FROM bronze_crimes 
+  GROUP BY departamento 
+  ORDER BY record_count DESC 
+  LIMIT 10
+")
+
+base::message("Top 10 departments by crime count:")
+base::print(dept_crime_counts)
+
+dept_population_counts <- DBI::dbGetQuery(con_laft, "
+  SELECT departamento, SUM(total) as total_population 
+  FROM bronze_population 
+  WHERE area_geografica = 'Total' 
+  GROUP BY departamento 
+  ORDER BY total_population DESC 
+  LIMIT 10
+")
+
+base::message("Top 10 departments by population:")
+base::print(dept_population_counts)
+
+# Close connection
+DBI::dbDisconnect(con_laft, shutdown = TRUE)
+base::message(glue::glue("Bronze layer for {org_id_laft} complete"))
+base::rm(list = base::ls())
+
+
+# ========================================================================
 # ORGANIZATION 1: FONEDH - MS EXCEL FILE PROCESSING
 # ========================================================================
 

@@ -1,5 +1,5 @@
-# Gold Layer Creation Script
-# Reads from Silver layer and creates analysis-ready Gold tables
+# Gold Layer Creation Script with Expanded Metrics
+# Creates gold tables by merging silver_clientes and silver_movimientos
 
 # Clear environment
 base::rm(list = base::ls())
@@ -8,17 +8,18 @@ base::rm(list = base::ls())
 base::set.seed(444)
 
 # Load required packages with explicit namespaces
-required_pkgs <- c("DBI", "duckdb", "dplyr", "lubridate", "glue")
+required_pkgs <- c("DBI", "duckdb", "dplyr", "glue")
 install_if_missing <- function(pkg) {
   if (!base::requireNamespace(pkg, quietly = TRUE)) utils::install.packages(pkg)
 }
 base::invisible(base::lapply(required_pkgs, install_if_missing))
+base::sapply(required_pkgs, require, character.only = TRUE)
 base::rm(install_if_missing, required_pkgs)
 
 # Define paths for Silver and Gold layers
-org_id <- "0001_Fonedh"
-silver_path <- base::file.path("Data", "Silver", org_id, "Model_2023_2024", paste0(org_id, ".duckdb"))
-gold_path <- base::file.path("Data", "Gold", org_id, "Model_2023_2024", paste0(org_id, ".duckdb"))
+org_id <- "0002_Coopcentral"
+silver_path <- base::file.path("Data", "Silver", org_id, "Model_2022_2023_2024", paste0(org_id, ".duckdb"))
+gold_path <- base::file.path("Data", "Gold", org_id, "Model_2022_2023_2024", paste0(org_id, ".duckdb"))
 
 # Create Gold directory if it doesn't exist
 if (!base::dir.exists(base::dirname(gold_path))) {
@@ -28,209 +29,367 @@ if (!base::dir.exists(base::dirname(gold_path))) {
 # Connect to Silver and Gold databases
 silver_con <- DBI::dbConnect(duckdb::duckdb(), dbdir = silver_path, read_only = TRUE)
 gold_con <- DBI::dbConnect(
-  duckdb::duckdb(),
+  duckdb::duckdb(), 
   dbdir = gold_path,
   config = base::list(
     memory_limit = "16GB",
     threads = "6"
-  ), 
+  ),
   read_only = FALSE
 )
 
 # Attach Silver database to Gold connection
 DBI::dbExecute(gold_con, glue::glue("ATTACH '{silver_path}' AS silver_db"))
 
-# Create prepared clients table with derived variables
-base::message("Preparing client data with derived variables...")
+clientes <- DBI::dbGetQuery(gold_con, "SELECT * FROM silver_db.silver_clientes")
+movimientos <- DBI::dbGetQuery(gold_con, "SELECT * FROM silver_db.silver_movimientos")
 
-DBI::dbExecute(gold_con, "
-  CREATE TABLE IF NOT EXISTS gold_clientes AS
-  WITH reference_date AS (
-    SELECT '2024-12-31'::DATE AS date
-  ),
-  
-  prepared_clients AS (
-    SELECT 
-      c.normalized_id AS num_identificacion,
-      c.rol,
-      DATEDIFF('years', c.fecha_nacimiento, (SELECT date FROM reference_date)) AS edad,
-      DATEDIFF('years', c.fecha_ingreso, (SELECT date FROM reference_date)) AS antiguedad,
-      
-      -- Type conversions and transformations
-      CASE
-        WHEN c.actividad_economica = 'Independiente' THEN 'Prestación Servicios'
-        ELSE c.tipo_contrato
-      END AS tipo_contrato,
-      
-      CASE
-        WHEN c.tipo_contrato = 'Término Indefinido' THEN 'Indefinido'
-        ELSE 'Otro'
-      END AS tipo_contrato_group,
-      
-      CASE
-        WHEN c.actividad_economica = 'Asalariado' THEN 'Asalariado'
-        ELSE 'Otro'
-      END AS actividad_economica_group,
-      
-      CASE
-        WHEN c.nivel_escolaridad IN ('Primaria', 'Bachillerato') THEN '01_Basico'
-        WHEN c.nivel_escolaridad IN ('Tecnico', 'Tecnologia') THEN '02_Tecnologico'
-        WHEN c.nivel_escolaridad = 'Universitario' THEN '03_Universitario'
-        ELSE '04_Posgrado'
-      END AS nivel_escolaridad_group,
-      
-      CASE
-        WHEN c.sector_economico IN ('Sector Privado Esal', 'Sector Privado Financiero Solidario') 
-          THEN 'Sector Privado'
-        ELSE c.sector_economico
-      END AS sector_economico_group,
-      
-      CASE
-        WHEN c.estrato = '1' THEN '1'
-        WHEN c.estrato = '2' THEN '2'
-        WHEN c.estrato = '3' THEN '3'
-        ELSE '4-5-6'
-      END AS estrato_group,
-      
-      c.activos,
-      c.pasivos,
-      c.salario_actual + COALESCE(c.otros_ingresos, 0) AS ingresos,
-      c.egresos
-    FROM silver_db.silver_clientes c
+# 1. GOLD_BAJO_MONTO TABLE
+base::message("Creating gold_bajo_monto table using improved approach...")
+
+# Calculate transactions per day in a single step
+clientes_bm_summary <- movimientos %>% 
+  dplyr::filter(nombre_prod == "8") %>% 
+  dplyr::group_by(num_ident) %>%
+  dplyr::summarise(
+    transaction_count = n(), 
+    num_days = n_distinct(fecha_transac),
+    num_transa = round(transaction_count / num_days,0)
+  ) %>%
+  dplyr::ungroup()
+
+# Prepare data for pivot - create all metrics in one step
+clientes_bm_metrics <- movimientos %>% 
+  dplyr::filter(nombre_prod == "8") %>% 
+  dplyr::group_by(num_ident, tipo_prod, tipo_transac, tipo_canal, jurisdiccion) %>%
+  dplyr::summarise(total_amount = sum(monto)) %>%
+  dplyr::ungroup() %>%
+  dplyr::mutate(
+    prod_transac = paste0(tipo_prod, "_", tipo_transac),
+    canal_transac = paste0(tipo_canal, "_", tipo_transac),
+    juris_transac = paste0(jurisdiccion, "_", tipo_transac)
   )
-  
-  SELECT 
-    pc.*,
-    CASE WHEN pc.tipo_contrato_group = 'Indefinido' THEN 1 ELSE 0 END AS tipo_contrato_indefinido,
-    CASE WHEN pc.tipo_contrato_group = 'Otro' THEN 1 ELSE 0 END AS tipo_contrato_otro,
-    CASE WHEN pc.actividad_economica_group = 'Asalariado' THEN 1 ELSE 0 END AS actividad_economica_asalariado,
-    CASE WHEN pc.actividad_economica_group = 'Otro' THEN 1 ELSE 0 END AS actividad_economica_otro,
-    CASE WHEN pc.sector_economico_group = 'Sector Privado' THEN 1 ELSE 0 END AS sector_economico_sector_privado,
-    CASE WHEN pc.sector_economico_group = 'Sector Publico Administrativo' THEN 1 ELSE 0 END AS sector_economico_sector_publico_administrativo,
-    CASE WHEN pc.sector_economico_group = 'Sector Publico Educacion' THEN 1 ELSE 0 END AS sector_economico_sector_publico_educacion,
-    CASE WHEN pc.sector_economico_group = 'Sector Publico Pensionado' THEN 1 ELSE 0 END AS sector_economico_sector_publico_pensionado,
-    CASE WHEN pc.sector_economico_group = 'Sector Publico Salud' THEN 1 ELSE 0 END AS sector_economico_sector_publico_salud
-  FROM prepared_clients pc
-  WHERE pc.rol = 'Asociado'
-")
 
-# Process transactions
-base::message("Processing transaction data...")
-
-DBI::dbExecute(gold_con, "
-  CREATE TABLE IF NOT EXISTS gold_movimientos AS
-  WITH renamed_transactions AS (
-    SELECT
-      normalized_id AS num_identificacion,
-      fecha_transaccion,
-      tipo_producto AS producto,
-      tipo_transaccion AS tipo,
-      tipo_canal_transaccion AS canal,
-      monto_transaccion AS monto,
-      strftime(fecha_transaccion, '%Y-%m') AS month_yr,
-      CASE WHEN tipo_canal_transaccion = 'Físico' THEN 'Fisico' ELSE 'Electronico' END AS canal_group
-    FROM silver_db.silver_movimientos
-  ),
-  
-  transaction_features AS (
-    SELECT
-      num_identificacion,
-      month_yr,
-      COUNT(*) AS n_tran,
-      SUM(CASE WHEN producto = 'Ahorro' AND tipo = 'Egreso' THEN monto ELSE 0 END) AS ahorro_egreso,
-      SUM(CASE WHEN producto = 'Ahorro' AND tipo = 'Ingreso' THEN monto ELSE 0 END) AS ahorro_ingreso,
-      SUM(CASE WHEN producto = 'Credito' AND tipo = 'Egreso' THEN monto ELSE 0 END) AS credito_egreso,
-      SUM(CASE WHEN producto = 'Credito' AND tipo = 'Ingreso' THEN monto ELSE 0 END) AS credito_ingreso,
-      SUM(CASE WHEN canal_group = 'Fisico' AND tipo = 'Egreso' THEN monto ELSE 0 END) AS fisico_egreso,
-      SUM(CASE WHEN canal_group = 'Fisico' AND tipo = 'Ingreso' THEN monto ELSE 0 END) AS fisico_ingreso,
-      SUM(CASE WHEN canal_group = 'Electronico' AND tipo = 'Egreso' THEN monto ELSE 0 END) AS electronico_egreso,
-      SUM(CASE WHEN canal_group = 'Electronico' AND tipo = 'Ingreso' THEN monto ELSE 0 END) AS electronico_ingreso
-    FROM renamed_transactions
-    GROUP BY num_identificacion, month_yr
-  ),
-  
-  months_active AS (
-    SELECT
-      num_identificacion,
-      COUNT(DISTINCT month_yr) AS n_mes
-    FROM transaction_features
-    GROUP BY num_identificacion
-  ),
-  
-  aggregated_features AS (
-    SELECT
-      t.num_identificacion,
-      SUM(t.ahorro_egreso) AS ahorro_egreso,
-      SUM(t.ahorro_ingreso) AS ahorro_ingreso,
-      SUM(t.credito_egreso) AS credito_egreso,
-      SUM(t.credito_ingreso) AS credito_ingreso,
-      SUM(t.fisico_egreso) AS fisico_egreso,
-      SUM(t.fisico_ingreso) AS fisico_ingreso,
-      SUM(t.electronico_egreso) AS electronico_egreso,
-      SUM(t.electronico_ingreso) AS electronico_ingreso,
-      COUNT(*) AS num_transacciones
-    FROM transaction_features t
-    GROUP BY t.num_identificacion
+# Create separate pivots more efficiently
+prod_metrics <- clientes_bm_metrics %>%
+  dplyr::select(num_ident, prod_transac, total_amount) %>%
+  dplyr::group_by(num_ident, prod_transac) %>%
+  dplyr::summarise(amount = sum(total_amount)) %>%
+  tidyr::pivot_wider(
+    names_from = prod_transac,
+    values_from = amount,
+    values_fill = list(amount = 0)
   )
+
+canal_metrics <- clientes_bm_metrics %>%
+  dplyr::select(num_ident, canal_transac, total_amount) %>%
+  dplyr::group_by(num_ident, canal_transac) %>%
+  dplyr::summarise(amount = sum(total_amount)) %>%
+  tidyr::pivot_wider(
+    names_from = canal_transac,
+    values_from = amount,
+    values_fill = list(amount = 0)
+  )
+
+juris_metrics <- clientes_bm_metrics %>%
+  dplyr::select(num_ident, juris_transac, total_amount) %>%
+  dplyr::group_by(num_ident, juris_transac) %>%
+  dplyr::summarise(amount = sum(total_amount)) %>%
+  tidyr::pivot_wider(
+    names_from = juris_transac,
+    values_from = amount,
+    values_fill = list(amount = 0)
+  )
+
+# Join all data in one step and normalize by transaction days
+gold_bajo_monto <- clientes_bm_summary %>%
+  dplyr::left_join(prod_metrics, by = "num_ident") %>%
+  dplyr::left_join(canal_metrics, by = "num_ident") %>%
+  dplyr::left_join(juris_metrics, by = "num_ident") %>%
+  dplyr::mutate(across(
+    .cols = -c(num_ident, transaction_count, num_days, num_transa),
+    .fns = ~ . / num_days
+  )) %>%
+  dplyr::select(
+    num_ident, num_transa, 
+    everything(), 
+    -transaction_count, -num_days
+  )
+
+# Write to DuckDB with consistent naming
+DBI::dbWriteTable(gold_con, "gold_bajo_monto", gold_bajo_monto, overwrite = TRUE)
+
+movimientos <- movimientos %>% 
+  dplyr::filter(nombre_prod != "8") %>%
+  dplyr::mutate(tipo_prod = dplyr::if_else(tipo_prod == "CDT", "Ahorro", tipo_prod))
+
+clientes <- clientes %>%
+  dplyr::rename(num_ident = documento) %>%
+  anti_join(gold_bajo_monto, by = "num_ident")
+
+# Clean up
+rm(clientes_bm_summary, clientes_bm_metrics, prod_metrics, canal_metrics, juris_metrics, gold_bajo_monto)
+
+# 2. Gold Table for "persona_juridica" segmentation
+base::message("Creating gold_persona_juridica table...")
+
+pj <- clientes %>% 
+    dplyr::filter(tipo_documento == "Nit") %>%
+    dplyr::select(num_ident,ciiu,estado,ingresos,egresos,activos,pasivos) %>%
+    dplyr::mutate(
+      ciiu = factor(ciiu),
+      estado = factor(estado),
+      comercio = dplyr::if_else(ciiu == "Comercio al por Mayor y por Menor", 1, 0),
+      construccion = dplyr::if_else(ciiu == "Construcción e Infraestructura", 1, 0),
+      ind_alimentaria = dplyr::if_else(ciiu == "Industria de Alimentos y Bebidas", 1, 0),
+      ind_manufacturera = dplyr::if_else(ciiu == "Industria Manufacturera", 1, 0),
+      no_clasificado = dplyr::if_else(ciiu == "No Clasificado", 1, 0),
+      otros_servicios = dplyr::if_else(ciiu == "Otros Servicios", 1, 0),
+      servicios_prof_tecn = dplyr::if_else(ciiu == "Servicios Profesionales y Técnicos", 1, 0),
+      activo = dplyr::if_else(estado == "A", 1, 0),
+      inactivo = dplyr::if_else(estado == "I", 1, 0)
+    ) %>%
+   dplyr::select(num_ident,construccion,ind_alimentaria,ind_manufacturera,no_clasificado,otros_servicios,servicios_prof_tecn,activo,inactivo,ingresos,egresos,activos,pasivos)
+
+movimientos_pj <- movimientos %>%
+  filter(num_ident %in% pj$num_ident)
+
+# Calculate transactions per day in a single step
+clientes_pj_summary <- movimientos_pj %>% 
+  dplyr::group_by(num_ident) %>%
+  dplyr::summarise(
+    transaction_count = n(), 
+    num_days = n_distinct(fecha_transac),
+    num_transa = round(transaction_count / num_days,0)
+  ) %>%
+  dplyr::ungroup()
+
+# Prepare data for pivot - create all metrics in one step
+clientes_pj_metrics <- movimientos %>% 
+  dplyr::group_by(num_ident, tipo_prod, tipo_transac, tipo_canal, jurisdiccion) %>%
+  dplyr::summarise(total_amount = sum(monto)) %>%
+  dplyr::ungroup() %>%
+  dplyr::mutate(
+    prod_transac = paste0(tipo_prod, "_", tipo_transac),
+    canal_transac = paste0(tipo_canal, "_", tipo_transac),
+    juris_transac = paste0(jurisdiccion, "_", tipo_transac)
+  )
+
+# Create separate pivots more efficiently
+prod_metrics <- clientes_pj_metrics %>%
+  dplyr::select(num_ident, prod_transac, total_amount) %>%
+  dplyr::group_by(num_ident, prod_transac) %>%
+  dplyr::summarise(amount = sum(total_amount)) %>%
+  tidyr::pivot_wider(
+    names_from = prod_transac,
+    values_from = amount,
+    values_fill = list(amount = 0)
+  )
+
+canal_metrics <- clientes_pj_metrics %>%
+  dplyr::select(num_ident, canal_transac, total_amount) %>%
+  dplyr::group_by(num_ident, canal_transac) %>%
+  dplyr::summarise(amount = sum(total_amount)) %>%
+  tidyr::pivot_wider(
+    names_from = canal_transac,
+    values_from = amount,
+    values_fill = list(amount = 0)
+  )
+
+juris_metrics <- clientes_pj_metrics %>%
+  dplyr::select(num_ident, juris_transac, total_amount) %>%
+  dplyr::group_by(num_ident, juris_transac) %>%
+  dplyr::summarise(amount = sum(total_amount)) %>%
+  tidyr::pivot_wider(
+    names_from = juris_transac,
+    values_from = amount,
+    values_fill = list(amount = 0)
+  )
+
+# Join all data in one step and normalize by transaction days
+gold_persona_juridica <- pj %>% 
+  dplyr::left_join(clientes_pj_summary, by = "num_ident") %>%
+  dplyr::left_join(prod_metrics, by = "num_ident") %>%
+  dplyr::left_join(canal_metrics, by = "num_ident") %>%
+  dplyr::left_join(juris_metrics, by = "num_ident") %>%
+  dplyr::mutate(across(
+    .cols = c(Ahorro_Egreso, Ahorro_Ingreso, Credito_Egreso, Credito_Ingreso,       
+              Fisico_Ingreso, Virtual_Egreso, Virtual_Ingreso, Fisico_Egreso, jurisdiccion_4_Egreso, 
+              jurisdiccion_4_Ingreso, jurisdiccion_5_Ingreso, jurisdiccion_5_Egreso, jurisdiccion_6_Egreso, jurisdiccion_0_Egreso,  
+              jurisdiccion_3_Ingreso, jurisdiccion_3_Egreso),
+    .fns = ~ . / num_days
+  )) %>%
+  dplyr::select(
+    num_ident, 
+    everything(), 
+    -transaction_count, -num_days
+  )
+
+# Write to DuckDB with consistent naming
+DBI::dbWriteTable(gold_con, "gold_persona_juridica", gold_persona_juridica, overwrite = TRUE)
+
+movimientos <- movimientos %>%
+  anti_join(gold_persona_juridica, by = "num_ident")
+
+clientes <- clientes %>%
+  anti_join(gold_persona_juridica, by = "num_ident")
+
+# Clean up
+rm(pj, movimientos_pj, clientes_pj_summary, clientes_pj_metrics, prod_metrics, canal_metrics, juris_metrics, gold_persona_juridica)
+
+
+# 3. Gold Table for "persona_natural" segmentation
+base::message("Creating gold_persona_natural table...")
+
+pn <- clientes %>% 
+  dplyr::select(num_ident,ciiu,estado,ingresos,egresos,activos,pasivos) %>%
+  dplyr::mutate(
+    ciiu = factor(ciiu),
+    estado = factor(estado),
+    comercio = dplyr::if_else(ciiu == "Comercio al por Mayor y por Menor" & !is.na(ciiu), 1, 0),
+    construccion = dplyr::if_else(ciiu == "Construcción e Infraestructura" & !is.na(ciiu), 1, 0),
+    ind_alimentaria = dplyr::if_else(ciiu == "Industria de Alimentos y Bebidas" & !is.na(ciiu), 1, 0),
+    ind_manufacturera = dplyr::if_else(ciiu == "Industria Manufacturera" & !is.na(ciiu), 1, 0),
+    no_clasificado = dplyr::if_else(ciiu == "No Clasificado" & !is.na(ciiu), 1, 0),
+    otros_servicios = dplyr::if_else(ciiu == "Otros Servicios" & !is.na(ciiu), 1, 0),
+    servicios_prof_tecn = dplyr::if_else(ciiu == "Servicios Profesionales y Técnicos" & !is.na(ciiu), 1, 0),
+    desconocido = dplyr::if_else(is.na(ciiu), 1, 0),
+    activo = dplyr::if_else(estado == "A", 1, 0),
+    inactivo = dplyr::if_else(estado == "I", 1, 0)
+  ) %>%
+  dplyr::select(num_ident,construccion,ind_alimentaria,ind_manufacturera,no_clasificado,otros_servicios,servicios_prof_tecn,desconocido,activo,inactivo,ingresos,egresos,activos,pasivos)
+
+movimientos_pn <- movimientos %>%
+  filter(num_ident %in% pn$num_ident)
+
+# Calculate transactions per day in a single step
+clientes_pn_summary <- movimientos_pn %>% 
+  dplyr::group_by(num_ident) %>%
+  dplyr::summarise(
+    transaction_count = n(), 
+    num_days = n_distinct(fecha_transac),
+    num_transa = round(transaction_count / num_days,0)
+  ) %>%
+  dplyr::ungroup()
+
+# Prepare data for pivot - create all metrics in one step
+clientes_pn_metrics <- movimientos %>% 
+  dplyr::group_by(num_ident, tipo_prod, tipo_transac, tipo_canal, jurisdiccion) %>%
+  dplyr::summarise(total_amount = sum(monto)) %>%
+  dplyr::ungroup() %>%
+  dplyr::mutate(
+    prod_transac = paste0(tipo_prod, "_", tipo_transac),
+    canal_transac = paste0(tipo_canal, "_", tipo_transac),
+    juris_transac = paste0(jurisdiccion, "_", tipo_transac)
+  )
+
+# Create separate pivots more efficiently
+prod_metrics <- clientes_pn_metrics %>%
+  dplyr::select(num_ident, prod_transac, total_amount) %>%
+  dplyr::group_by(num_ident, prod_transac) %>%
+  dplyr::summarise(amount = sum(total_amount)) %>%
+  tidyr::pivot_wider(
+    names_from = prod_transac,
+    values_from = amount,
+    values_fill = list(amount = 0)
+  )
+
+canal_metrics <- clientes_pn_metrics %>%
+  dplyr::select(num_ident, canal_transac, total_amount) %>%
+  dplyr::group_by(num_ident, canal_transac) %>%
+  dplyr::summarise(amount = sum(total_amount)) %>%
+  tidyr::pivot_wider(
+    names_from = canal_transac,
+    values_from = amount,
+    values_fill = list(amount = 0)
+  )
+
+juris_metrics <- clientes_pn_metrics %>%
+  dplyr::select(num_ident, juris_transac, total_amount) %>%
+  dplyr::group_by(num_ident, juris_transac) %>%
+  dplyr::summarise(amount = sum(total_amount)) %>%
+  tidyr::pivot_wider(
+    names_from = juris_transac,
+    values_from = amount,
+    values_fill = list(amount = 0)
+  )
+
+# Join all data in one step and normalize by transaction days
+gold_persona_natural <- pn %>% 
+  dplyr::left_join(clientes_pn_summary, by = "num_ident") %>%
+  dplyr::left_join(prod_metrics, by = "num_ident") %>%
+  dplyr::left_join(canal_metrics, by = "num_ident") %>%
+  dplyr::left_join(juris_metrics, by = "num_ident") %>%
+  dplyr::mutate(across(
+    .cols = c(Ahorro_Egreso, Ahorro_Ingreso, Credito_Egreso, Credito_Ingreso,       
+              Fisico_Ingreso, Virtual_Egreso, Virtual_Ingreso, Fisico_Egreso, jurisdiccion_4_Egreso, 
+              jurisdiccion_4_Ingreso, jurisdiccion_5_Ingreso, jurisdiccion_5_Egreso, jurisdiccion_6_Egreso, jurisdiccion_0_Egreso,  
+              jurisdiccion_3_Ingreso),
+    .fns = ~ . / num_days
+  )) %>%
+  dplyr::select(
+    num_ident, 
+    everything(), 
+    -transaction_count, -num_days
+  )
+
+# Write to DuckDB with consistent naming
+DBI::dbWriteTable(gold_con, "gold_persona_natural", gold_persona_natural, overwrite = TRUE)
+
+# Clean up
+rm(movimientos, clientes, pn, movimientos_pn, clientes_pn_summary, clientes_pn_metrics, prod_metrics, canal_metrics, juris_metrics, gold_persona_natural)
+
+# Create indexes for better performance (only if tables exist)
+tryCatch({
+  DBI::dbExecute(gold_con, "CREATE INDEX IF NOT EXISTS idx_bajo_monto_id ON gold_bajo_monto(num_ident)")
+  base::message("Created index on gold_bajo_monto")
+}, error = function(e) {
+  base::message("Skipping index creation for gold_bajo_monto table, table does not exist")
+})
+
+tryCatch({
+  DBI::dbExecute(gold_con, "CREATE INDEX IF NOT EXISTS idx_persona_juridica_id ON gold_persona_juridica(num_ident)")
+  base::message("Created index on gold_persona_juridica")
+}, error = function(e) {
+  base::message("Skipping index creation for gold_persona_juridica table, table does not exist")
+})
+
+tryCatch({
+  DBI::dbExecute(gold_con, "CREATE INDEX IF NOT EXISTS idx_persona_natural_id ON gold_persona_natural(num_ident)")
+  base::message("Created index on gold_persona_natural")
+}, error = function(e) {
+  base::message("Skipping index creation for gold_persona_natural table, table does not exist")
+})
+
+# Optimize Database Performance
+DBI::dbExecute(gold_con, "VACUUM")
+DBI::dbExecute(gold_con, "ANALYZE")
+
+# Display table statistics
+base::message("Checking tables and their row counts:")
+tables <- DBI::dbListTables(gold_con)
+tables_with_gold_prefix <- tables[base::grepl("^gold_", tables)]
+
+if (base::length(tables_with_gold_prefix) > 0) {
+  table_stats <- base::data.frame(table_name=character(), row_count=integer())
   
-  SELECT
-    a.num_identificacion,
-    a.ahorro_egreso / m.n_mes AS ahorro_egreso,
-    a.ahorro_ingreso / m.n_mes AS ahorro_ingreso,
-    a.credito_egreso / m.n_mes AS credito_egreso,
-    a.credito_ingreso / m.n_mes AS credito_ingreso,
-    a.fisico_egreso / m.n_mes AS fisico_egreso,
-    a.fisico_ingreso / m.n_mes AS fisico_ingreso,
-    a.electronico_egreso / m.n_mes AS electronico_egreso,
-    a.electronico_ingreso / m.n_mes AS electronico_ingreso,
-    a.num_transacciones / m.n_mes AS num_transacciones,
-    m.n_mes
-  FROM aggregated_features a
-  JOIN months_active m ON a.num_identificacion = m.num_identificacion
-")
-
-# Create final affiliates table
-base::message("Creating gold_affiliates table...")
-
-DBI::dbExecute(gold_con, "
-  CREATE TABLE IF NOT EXISTS gold_affiliates AS
-  SELECT
-    c.num_identificacion,
-    c.activos AS \"Activos\",
-    c.pasivos AS \"Pasivos\",
-    c.ingresos AS \"Ingresos\",
-    c.egresos AS \"Egresos\",
-    m.ahorro_egreso AS \"Ahorro Egr.\",
-    m.ahorro_ingreso AS \"Ahorro Ing.\",
-    m.credito_egreso AS \"Credito Egr.\",
-    m.credito_ingreso AS \"Credito Ing.\",
-    m.fisico_egreso AS \"Fisico Egr.\",
-    m.fisico_ingreso AS \"Fisico Ing.\",
-    m.electronico_egreso AS \"Elec. Egr.\",
-    m.electronico_ingreso AS \"Elec. Ing.\",
-    m.num_transacciones AS \"Num. Trans.\",
-    c.tipo_contrato_indefinido AS \"T.Contr. Indef.\",
-    c.tipo_contrato_otro AS \"T.Contr. Otro\",
-    c.actividad_economica_asalariado AS \"Act. Eco. Asalar.\",
-    c.actividad_economica_otro AS \"Act. Eco. Otro\",
-    c.sector_economico_sector_privado AS \"S.Econ. Priv.\",
-    c.sector_economico_sector_publico_administrativo AS \"S.Econ. Pub. Admon.\",
-    c.sector_economico_sector_publico_educacion AS \"S.Econ. Pub. Edu.\",
-    c.sector_economico_sector_publico_pensionado AS \"S.Econ. Pub. Pens.\",
-    c.sector_economico_sector_publico_salud AS \"S.Econ. Pub. Salud\"
-  FROM gold_clientes c
-  JOIN gold_movimientos m ON c.num_identificacion = m.num_identificacion
-")
-
-clientes <- DBI::dbGetQuery(gold_con, "SELECT * FROM gold_affiliates")
-
-# Verify record counts
-affiliates_count <- DBI::dbGetQuery(gold_con, "SELECT COUNT(*) FROM gold_affiliates")
-base::message(glue::glue("Gold layer created successfully with {affiliates_count} affiliates"))
+  for (table in tables_with_gold_prefix) {
+    count_query <- glue::glue("SELECT COUNT(*) AS row_count FROM {table}")
+    count_result <- DBI::dbGetQuery(gold_con, count_query)
+    table_stats <- base::rbind(table_stats, base::data.frame(table_name=table, row_count=count_result$row_count))
+  }
+  
+  base::message("Gold tables created:")
+  base::print(table_stats)
+} else {
+  base::message("No gold tables were created successfully")
+}
 
 # Close database connections
 DBI::dbExecute(gold_con, "DETACH DATABASE silver_db;")
 DBI::dbDisconnect(silver_con)
 DBI::dbDisconnect(gold_con)
 
+# Clean up environment
 base::rm(list = base::ls())
+
