@@ -41,7 +41,9 @@ gold_con <- DBI::dbConnect(
 # Attach Silver database to Gold connection
 DBI::dbExecute(gold_con, glue::glue("ATTACH '{silver_path}' AS silver_db"))
 
-clientes <- DBI::dbGetQuery(gold_con, "SELECT * FROM silver_db.silver_clientes")
+clientes <- DBI::dbGetQuery(gold_con, "SELECT * FROM silver_db.silver_clientes") %>%
+  dplyr::rename(num_ident = documento)
+
 movimientos <- DBI::dbGetQuery(gold_con, "SELECT * FROM silver_db.silver_movimientos")
 
 # 1. GOLD_BAJO_MONTO TABLE
@@ -124,7 +126,6 @@ movimientos <- movimientos %>%
   dplyr::mutate(tipo_prod = dplyr::if_else(tipo_prod == "CDT", "Ahorro", tipo_prod))
 
 clientes <- clientes %>%
-  dplyr::rename(num_ident = documento) %>%
   anti_join(gold_bajo_monto, by = "num_ident")
 
 # Clean up
@@ -149,7 +150,7 @@ pj <- clientes %>%
       activo = dplyr::if_else(estado == "A", 1, 0),
       inactivo = dplyr::if_else(estado == "I", 1, 0)
     ) %>%
-   dplyr::select(num_ident,construccion,ind_alimentaria,ind_manufacturera,no_clasificado,otros_servicios,servicios_prof_tecn,activo,inactivo,ingresos,egresos,activos,pasivos)
+   dplyr::select(num_ident,comercio,construccion,ind_alimentaria,ind_manufacturera,no_clasificado,otros_servicios,servicios_prof_tecn,activo,inactivo,ingresos,egresos,activos,pasivos)
 
 movimientos_pj <- movimientos %>%
   filter(num_ident %in% pj$num_ident)
@@ -250,14 +251,13 @@ pn <- clientes %>%
     construccion = dplyr::if_else(ciiu == "Construcción e Infraestructura" & !is.na(ciiu), 1, 0),
     ind_alimentaria = dplyr::if_else(ciiu == "Industria de Alimentos y Bebidas" & !is.na(ciiu), 1, 0),
     ind_manufacturera = dplyr::if_else(ciiu == "Industria Manufacturera" & !is.na(ciiu), 1, 0),
-    no_clasificado = dplyr::if_else(ciiu == "No Clasificado" & !is.na(ciiu), 1, 0),
+    no_clasificado = dplyr::if_else(ciiu == "No Clasificado" | is.na(ciiu), 1, 0),
     otros_servicios = dplyr::if_else(ciiu == "Otros Servicios" & !is.na(ciiu), 1, 0),
     servicios_prof_tecn = dplyr::if_else(ciiu == "Servicios Profesionales y Técnicos" & !is.na(ciiu), 1, 0),
-    desconocido = dplyr::if_else(is.na(ciiu), 1, 0),
     activo = dplyr::if_else(estado == "A", 1, 0),
     inactivo = dplyr::if_else(estado == "I", 1, 0)
   ) %>%
-  dplyr::select(num_ident,construccion,ind_alimentaria,ind_manufacturera,no_clasificado,otros_servicios,servicios_prof_tecn,desconocido,activo,inactivo,ingresos,egresos,activos,pasivos)
+  dplyr::select(num_ident,comercio,construccion,ind_alimentaria,ind_manufacturera,no_clasificado,otros_servicios,servicios_prof_tecn,activo,inactivo,ingresos,egresos,activos,pasivos)
 
 movimientos_pn <- movimientos %>%
   filter(num_ident %in% pn$num_ident)
