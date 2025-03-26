@@ -58,17 +58,22 @@ base::tryCatch({
 base::rm(con,gold_path,org_id)
 
 # 2. Copy dataset for transformation
+
+(zero_counts <- colSums(affiliates[,-1] == 0))
+(zero_percentages <- round((zero_counts / nrow(affiliates[,-1])) * 100,2))
+
 affiliates_t <- affiliates
 
-# 3. Identify columns for Box-Cox transformation (from "Activos" to "num_transacciones")
-boxcox_columns <- base::seq(from = base::which(base::names(affiliates_t) == "Activos"),
-                            to = base::which(base::names(affiliates_t) == "Num. Trans."))
+# 3. Identify columns for Box-Cox transformation (from "num_transa" to "Fisico_Ingreso")
+boxcox_columns <- base::seq(from = base::which(base::names(affiliates_t) == "num_transa"),
+                            to = base::which(base::names(affiliates_t) == "Fisico_Ingreso"))
 
 # 4. Apply Box-Cox transformation to each selected column
 lambda_values <- base::numeric(length(boxcox_columns))
 for (i in base::seq_along(boxcox_columns)) {
   col_index <- boxcox_columns[i]
-  shift_value <- base::abs(min(affiliates_t[[col_index]], na.rm = TRUE)) + 1
+  temp <- base::min(affiliates_t[[col_index]], na.rm = TRUE)
+  shift_value <- base::ifelse(temp <= 0, abs(temp) + 1, 0)
   x <- affiliates_t[[col_index]] + shift_value
   lambda <- base::as.numeric(summary(car::powerTransform(x))$result[, 2])
   if (lambda == 0) {
@@ -77,154 +82,563 @@ for (i in base::seq_along(boxcox_columns)) {
     affiliates_t[[col_index]] <- (x^lambda - 1) / lambda
   }
   lambda_values[i] <- lambda
+  base::rm(temp,shift_value,lambda,col_index,x)
 }
-base::rm(x, lambda, col_index, shift_value, i, boxcox_columns)
+
+lambda_values
+
+base::rm(i, boxcox_columns)
+
+# Load required packages
+if (!base::requireNamespace("ggplot2", quietly = TRUE)) utils::install.packages("ggplot2")
+if (!base::requireNamespace("gridExtra", quietly = TRUE)) utils::install.packages("gridExtra")
+
+# Function to create histogram plots
+create_histogram_matrix <- function(original_df, transformed_df) {
+  # Get common variable names (excluding any ID or non-numeric columns)
+  var_names <- base::intersect(
+    base::names(original_df),
+    base::names(transformed_df)
+  )
+  
+  # Filter out potential non-numeric columns
+  numeric_vars <- base::sapply(original_df[var_names], base::is.numeric)
+  var_names <- var_names[numeric_vars]
+  
+  # Initialize plot list
+  plot_list <- base::list()
+  plot_count <- 1
+  
+  # Create histograms for each variable
+  for (var in var_names) {
+    # Original data histogram
+    orig_hist <- ggplot2::ggplot(original_df, ggplot2::aes_string(x = var)) +
+      ggplot2::geom_histogram(fill = "steelblue", color = "white", bins = 20) +
+      ggplot2::theme_minimal() +
+      ggplot2::theme(
+        axis.title.x = ggplot2::element_blank(),
+        axis.title.y = ggplot2::element_blank(),
+        plot.title = ggplot2::element_blank(),
+        plot.margin = ggplot2::unit(c(0.1, 0.1, 0.1, 0.1), "cm")
+      ) +
+      ggplot2::annotate("text", x = Inf, y = Inf, 
+                        label = "Original", hjust = 1.1, vjust = 1.5,
+                        size = 3)
+    
+    # Transformed data histogram
+    trans_hist <- ggplot2::ggplot(transformed_df, ggplot2::aes_string(x = var)) +
+      ggplot2::geom_histogram(fill = "coral", color = "white", bins = 20) +
+      ggplot2::theme_minimal() +
+      ggplot2::theme(
+        axis.title.x = ggplot2::element_blank(),
+        axis.title.y = ggplot2::element_blank(),
+        plot.title = ggplot2::element_blank(),
+        plot.margin = ggplot2::unit(c(0.1, 0.1, 0.1, 0.1), "cm")
+      ) +
+      ggplot2::annotate("text", x = Inf, y = Inf, 
+                        label = "Transformed", hjust = 1.1, vjust = 1.5,
+                        size = 3)
+    
+    # Add variable name as small text in the top-left corner of original plot
+    orig_hist <- orig_hist + 
+      ggplot2::annotate("text", x = -Inf, y = Inf, 
+                        label = var, hjust = -0.1, vjust = 1.5,
+                        size = 3, fontface = "bold")
+    
+    # Add plots to list
+    plot_list[[plot_count]] <- orig_hist
+    plot_list[[plot_count + length(var_names)]] <- trans_hist
+    
+    plot_count <- plot_count + 1
+  }
+  
+  # Arrange plots in a matrix (original variables in first row, transformed in second)
+  n_vars <- base::length(var_names)
+  gridExtra::grid.arrange(
+    base::do.call(gridExtra::arrangeGrob, 
+                  c(plot_list, 
+                    list(ncol = n_vars, nrow = 2))),
+    top = ""
+  )
+}
+
+
+create_histogram_matrix(affiliates[,c(11:15)], affiliates_t[,c(11:15)])
+create_histogram_matrix(affiliates[,c(16:19)], affiliates_t[,c(16:19)])
+create_histogram_matrix(affiliates[,c(20:23)], affiliates_t[,c(20:23)])
+
 
 # 5. Perform PCA (exclude first column if it's an identifier)
 pca_results <- FactoMineR::PCA(affiliates_t[, -1], scale.unit = TRUE, ncp = 10, graph = FALSE)
+pca_results$eig
 # Optional scree plot:
-factoextra::fviz_eig(pca_results, addlabels = TRUE, barfill = "#8e0152", barcolor = "#8e0152")
+factoextra::fviz_eig(pca_results, addlabels = TRUE)
+factoextra::fviz_pca_var(pca_results, col.var = "cos2",
+                         gradient.cols = gg_color(5), 
+                         repel = TRUE # Avoid text overlapping
+)
+
+factoextra::fviz_pca_ind(pca_results, 
+                         geom.ind = "point",   # Show only points
+                         labelsize = 0,        # Remove labels
+                         addEllipses = FALSE,  # Disable ellipses
+                         mean.point = FALSE,   # Remove mean points
+                         alpha.ind = 0.8,      # Point transparency (0-1)
+                         pointsize = 0.5         # Point size
+)
+
 scores <- base::as.data.frame(pca_results$ind$coord)
 
 
 # 6. Choosing the best clustering algorithm 
 
+set.seed(444)  # For reproducibility
+
+k_range <- 2:6  # Adjust based on your n1:n2
+B <- 100
+
 clmethods <- c("hierarchical", "kmeans", "pam", "clara")
 
-validation <- clValid::clValid(obj = scores, 
-                               nClust = 2:6,
-                               clMethods = clmethods,
-                               validation = "internal",
-                               metric = "euclidean",
-                               method = "ward",
-                               maxitems = 10000)
+validation <- clValid::clValid(
+  obj = scores,
+  nClust = k_range,  # Use the same k_range (2:6) as in clusterboot
+  clMethods = clmethods,  # Use the same methods
+  validation = "internal",  # Only need internal metrics
+  maxitems = 3000,  # Adjust based on your centers matrix size
+  method = "ward"
+)
 
-optimal_scores <- clValid::optimalScores(validation)
+# Load required packages
+library(foreach)
+library(doParallel)
 
-base::rm(clmethods)
+# Register parallel backend
+cl <- parallel::makeCluster(parallel::detectCores() - 1)
+doParallel::registerDoParallel(cl)
 
-# 7. Cluster stability analysis via bootstrap
 
-cluster_stability_hier <- fpc::clusterboot(scores, B = 100, clustermethod = fpc::hclustCBI, method = "ward.D2", k = 2)
-cluster_stability_kmeans1 <- fpc::clusterboot(scores, B = 100, clustermethod = kmeansCBI, k = 3, seed = 444)
-cluster_stability_kmeans2 <- fpc::clusterboot(scores, B = 100, clustermethod = kmeansCBI, k = 4, seed = 444)
+run_clusterboot <- function(data, methods, k_range, B) {
+  cl <- parallel::makeCluster(parallel::detectCores()-1)
+  doParallel::registerDoParallel(cl)
+  
+  results <- foreach::foreach(method = rep(methods, each=base::length(k_range)), 
+                              k = rep(k_range, base::length(methods)),
+                              .combine = base::c, 
+                              .packages = c("fpc", "clValid")) %dopar% {
+                                # Method-specific parameters
+                                params <- base::switch(method,
+                                                       "hierarchical" = base::list(clustermethod = fpc::hclustCBI, method = "ward.D2"),
+                                                       "kmeans" = base::list(clustermethod = fpc::kmeansCBI),
+                                                       "pam" = base::list(clustermethod = fpc::pamkCBI),
+                                                       "clara" = base::list(clustermethod = fpc::claraCBI)
+                                )
+                                
+                                # Run clusterboot
+                                base::set.seed(444)
+                                cb <- base::tryCatch({
+                                  base::do.call(fpc::clusterboot, c(base::list(
+                                    data = data,
+                                    B = B,
+                                    bootmethod = "boot",
+                                    k = k
+                                  ), params))
+                                }, error = function(e) NULL)
+                                
+                                base::list(base::list(method = method, k = k, result = cb))
+                              }
+  parallel::stopCluster(cl)
+  return(results)
+}
 
-# 8. Creating summary table for clustering method selection 
-# Create helper function to process cluster stability objects
-process_stability <- function(stability, method, k) {
-  data.frame(
-    Method = paste0(method, " (k = ",k,")"),
-    Connectivity = if(method == "hierarchical" && k == 2) 
-      round(optimal_scores["Connectivity", "Score"], 2) else NA,
-    Dunn = if(method == "kmeans" && k == 4) 
-      round(optimal_scores["Dunn", "Score"], 2) else NA,
-    Silhouette = if(method == "kmeans" && k == 3) 
-      round(optimal_scores["Silhouette", "Score"], 2) else NA,
-    Jaccard_min = round(min(stability$bootmean), 2),
-    Jaccard_prom = round(mean(stability$bootmean), 2),
-    Jaccard_max = round(max(stability$bootmean), 2),
-    Dissolved = paste(stability$bootbrd, collapse = ", "),
-    Recovered = paste(stability$bootrecover, collapse = ", "),
-    stringsAsFactors = FALSE
+# 3. Process stability results with integrated clValid metrics
+process_stability_enhanced <- function(results, clvalid_obj) {
+  purrr::map_dfr(results, function(res) {
+    if(base::is.null(res$result)) return(NULL)
+    
+    # Extract clusterboot metrics
+    cb_metrics <- base::with(res$result, {
+      base::data.frame(
+        Jaccard_min = base::min(bootmean),
+        Jaccard_mean = base::mean(bootmean),
+        Jaccard_max = base::max(bootmean),
+        Dissolved = base::paste(bootbrd, collapse = ", "),
+        Recovered = base::paste(bootrecover, collapse = ", ")
+      )
+    })
+    
+    # Extract clValid metrics
+    clv_metrics <- base::tryCatch({
+      idx <- base::which(clvalid_obj@clMethods == res$method)
+      k_idx <- base::which(clvalid_obj@nClust == res$k)
+      
+      base::data.frame(
+        Connectivity = clvalid_obj@measures["Connectivity", k_idx, idx],
+        Dunn = clvalid_obj@measures["Dunn", k_idx, idx],
+        Silhouette = clvalid_obj@measures["Silhouette", k_idx, idx]
+      )
+    }, error = function(e) base::data.frame(Connectivity = NA, Dunn = NA, Silhouette = NA))
+    
+    # Combine all metrics
+    base::cbind(
+      base::data.frame(
+        Method = base::paste0(base::toupper(base::substr(res$method, 1, 1)), 
+                              base::substr(res$method, 2, base::nchar(res$method))),
+        K = res$k
+      ),
+      clv_metrics,
+      cb_metrics
+    )
+  })
+}
+
+# 4. Generate final summary table
+create_summary_table <- function(processed_data) {
+  # Order columns
+  processed_data %>%
+    dplyr::select(Method, K, Connectivity, Dunn, Silhouette,
+                  Jaccard_min, Jaccard_mean, Jaccard_max,
+                  Dissolved, Recovered) %>%
+    dplyr::arrange(Method, K) %>%
+    dplyr::mutate(dplyr::across(c(Connectivity, Dunn, Silhouette, 
+                                  Jaccard_min, Jaccard_mean, Jaccard_max),
+                                ~ base::round(., 3))) %>%
+    dplyr::rename_with(~ base::gsub("_", " ", .x)) 
+}
+
+# Usage example -----------------------------------------------------------
+# Assuming 'centers' is your data and 'validation' is clValid object
+
+# Run clusterboot for all method/k combinations
+cb_results <- run_clusterboot(scores, clmethods, k_range, B)
+
+# Process results with clValid integration
+processed_data <- process_stability_enhanced(cb_results, validation)
+
+# Create final formatted table
+final_summary <- create_summary_table(processed_data)
+
+# Print formatted table
+knitr::kable(final_summary, caption = "Comprehensive Clustering Evaluation")
+
+# 1. Prepare normalized data for radar chart
+# Select relevant metrics
+radar_data <- final_summary %>%
+  dplyr::select(Method, K, Connectivity, Dunn, Silhouette, `Jaccard mean`)
+
+# Normalize metrics (0-1 scale)
+for (metric in c("Connectivity", "Dunn", "Silhouette", "Jaccard mean")) {
+  radar_data[[metric]] <- scales::rescale(radar_data[[metric]], to = c(0, 1))
+}
+
+# 2. Create radar chart function with fmsb
+create_fmsb_radar <- function(data, method_name, k_value) {
+  # Filter data for specific method and k
+  plot_data <- data %>%
+    dplyr::filter(Method == method_name & K == k_value) %>%
+    dplyr::select(-Method, -K)
+  
+  # Add max and min rows required by fmsb
+  plot_data <- rbind(
+    rep(1, ncol(plot_data)),  # Max values
+    rep(0, ncol(plot_data)),  # Min values
+    plot_data
+  )
+  
+  # Create color palette
+  colors <- c("#1B9E77", "#D95F02", "#7570B3", "#E7298A")  # ColorBrewer Set2
+  
+  # Create radar chart
+  fmsb::radarchart(
+    plot_data,
+    axistype = 1,
+    pcol = colors[which(unique(data$Method) == method_name)],
+    pfcol = scales::alpha(colors[which(unique(data$Method) == method_name)], 0.3),
+    plwd = 2,
+    cglcol = "grey",
+    cglty = 1,
+    axislabcol = "grey30",
+    vlcex = 0.8,
+    title = paste("Method:", method_name, "| Clusters:", k_value)
   )
 }
 
-# Create summary table combining internal validation and stability analysis
-cluster_summary <- t(rbind(
-  process_stability(cluster_stability_hier, "hierarchical", 2),
-  process_stability(cluster_stability_kmeans1, "kmeans", 3),
-  process_stability(cluster_stability_kmeans2, "kmeans", 4)
-)) %>% 
-  janitor::row_to_names(row_number = 1) %>%
-  base::data.frame() %>%
-  tibble::rownames_to_column(var = "Medida")
+# 3. Create comparison grid of radar charts
+# Set up plotting grid
+graphics::par(mfrow = c(2, 2), mar = c(1, 1, 2, 1))
 
-names(cluster_summary)[-1] <- c("Jerarquico (k=2)","kmedias (k=3)", "kmedias (k=4)") 
+# Generate charts for key configurations
+create_fmsb_radar(radar_data, "Pam", 5)
+create_fmsb_radar(radar_data, "Clara", 5)
+create_fmsb_radar(radar_data, "Hierarchical", 5)
+create_fmsb_radar(radar_data, "Hierarchical", 6)
+
+graphics::par(mfrow = c(1, 1), mar = c(1, 1, 2, 1))
 
 
 # 9. Set number of clusters and perform clustering
-k <- 3
+k <- 5
 
-hc <- fpc::kmeansCBI(data = scores,
-                     k = k,
-                     scaling = FALSE)
+# Perform pam clustering on the centers using fcp
+hc_result <- fpc::hclustCBI(scores, k = k, method = "ward.D2",scaling = FALSE)
 
-centroids <- hc$result$centers
+# Define specific colors for clusters 1, 2, and 3
+cluster_colors <- c("1" = "#F8766D", "2" = "#A3A500", "3" = "#00BF7D", "4" = "#00B0F6", "5" = "#E76BF3")
 
-# Compute the Euclidean distance matrix among the centroids
-centroid_dist <- stats::dist(centroids, method = "euclidean")
 
-# Perform hierarchical clustering on the centroid distance matrix
-hc_centroids <- stats::hclust(centroid_dist, method = "ward.D2")
+# Create a color palette that respects the original cluster numbering
+color_palette <- cluster_colors[base::as.character(base::sort(base::unique(hc_result$partition)))]
 
-# Visualize the dendrogram of the centroids
-factoextra::fviz_dend(hc_centroids, cex = 1, k = k, k_colors = gg_color(k), rect = TRUE)
 
-affiliates$cluster <- base::as.factor(hc$result$cluster)
+# Extract the hclust object from hc_result
+hclust_obj <- hc_result$result
+
+# Create the dendrogram plot with proper color mapping
+factoextra::fviz_dend(
+  hclust_obj,
+  cex = 0.5,
+  k = k,
+  k_colors = cluster_colors,
+  rect = TRUE
+)
+
+centers_dist <- stats::dist(scores)
+
+sil_widths <- cluster::silhouette(
+  hc_result$partition,
+  centers_dist
+)
+
+# Visualize silhouette scores
+factoextra::fviz_silhouette(sil_widths) +
+  ggplot2::scale_fill_manual(values = gg_color(k)) +
+  ggplot2::labs(
+    title = "Cluster Quality Assessment"
+  ) + ggplot2::theme(legend.position = "bottom")
+
+# 10. Assign clusters to original data
+# Map back to original data points
+# Each original point inherits the cluster of its k-means center
+affiliates <- affiliates %>%
+  dplyr::mutate(cluster = base::factor(hc_result$partition))
+
 
 # 10. Visualize cluster results
 
 # 10a. Scatter Plot: First 2 principal components with clusters
-clus_res <- base::data.frame(scores[, 1:2], cluster = affiliates$cluster)
+clus_res <- base::data.frame(scores[, 1:2], cluster = factor(affiliates$cluster))
 ggpubr::ggscatter(clus_res,
                   x = "Dim.1", y = "Dim.2", color = "cluster",
-                  repel = FALSE, ellipse = TRUE, ellipse.type = "convex",
-                  shape = 19, size = 1, ggtheme = ggplot2::theme_minimal()) + 
+                  repel = FALSE, ellipse = TRUE, ellipse.type = "none",
+                  shape = 19, size = 1, 
+                  xlab = paste0("Dim.1"," (", round(pca_results$eig[1,2],1),"%)"), 
+                  ylab = paste0("Dim.2"," (", round(pca_results$eig[2,2],1),"%)"), 
+                  ggtheme = ggplot2::theme_minimal()) + 
   ggplot2::geom_hline(ggplot2::aes(yintercept = 0), color = "black", linetype = "dashed") +
   ggplot2::geom_vline(ggplot2::aes(xintercept = 0), color = "black", linetype = "dashed") +
   ggplot2::theme(legend.position = "bottom")
 
-# 10b. Boxplot: For key variable "Ingresos" by cluster (if available)
-if ("Ingresos" %in% base::names(affiliates)) {
-  ggplot2::ggplot(affiliates, ggplot2::aes(x = cluster, y = Ingresos, fill = cluster)) +
-    ggplot2::geom_boxplot() +
-    ggplot2::labs(title = "Distribución de Ingresos por Clúster", x = "Clúster", y = "Ingresos") +
-    ggplot2::theme_minimal() +
-    ggplot2::theme(legend.position = "bottom")
-} else {
-  base::message("Variable 'Ingresos' no encontrada; no se crea boxplot.")
-}
-
-# 11. Create summary_table: average of key features per cluster
-# Define key features (adjust as needed)
-key_features <- names(affiliates)[2:14]
-existing_features <- key_features[key_features %in% base::names(affiliates)]
-if (base::length(existing_features) > 0) {
-  summary_table <- affiliates %>%
-    dplyr::group_by(cluster) %>%
-    dplyr::summarise(dplyr::across(dplyr::all_of(existing_features), ~ base::mean(.x, na.rm = TRUE))) %>%
-    base::as.data.frame()
-} else {
-  summary_table <- base::data.frame(cluster = NA)
-}
-
-# 11. Radar Chart: Plot cluster profiles using summary_table (if available)
-if (base::nrow(summary_table) > 0 && base::ncol(summary_table) > 1) {
-  feature_data <- base::as.matrix(summary_table[ , -1])  # Exclude cluster column
-  max_vals <- base::apply(feature_data, 2, base::max)
-  min_vals <- base::apply(feature_data, 2, base::min)
-  radar_data <- base::data.frame(base::rbind(max_vals, min_vals, feature_data))
-  base::rownames(radar_data)[1:2] <- base::c("Max", "Min")
-  fmsb::radarchart(radar_data, axistype = 1, seg = 5,
-                   pcol = grDevices::rainbow(base::nrow(summary_table)),
-                   pfcol = scales::alpha(grDevices::rainbow(base::nrow(summary_table)), 0.5),
-                   plwd = 2, title = "Perfil de Clústeres")
-} else {
-  base::message("No se pudo crear el gráfico radar: summary_table vacío.")
-}
-
 # 12. (Optional) Pie Chart of Cluster Proportions
 cluster_counts <- base::table(affiliates$cluster)
-labels <- base::paste0("Cl. ", base::names(cluster_counts), " ", cluster_counts, " ", base::round(100 * base::prop.table(cluster_counts), 1), "%")
+labels <- base::paste0("Cl. ", base::names(cluster_counts), ": ", cluster_counts, "; ", base::round(100 * base::prop.table(cluster_counts), 1), "%")
 # Save pie chart as PNG
 plotrix::pie3D(cluster_counts,
                labels = labels, explode = 0.1, radius = 0.9, height = 0.05,
                col = gg_color(k), labelcex = 0.7, main = "Proporción de Clústeres"
 )
 
+
+# Function to create radar charts displayed in RStudio
+create_cluster_radar_charts <- function(data, features_to_plot) {
+  # Exclude identifier and group by cluster
+  features <- data[, c(features_to_plot, "cluster")]
+  
+  # Calculate means by cluster
+  cluster_means <- stats::aggregate(. ~ cluster, data = features, FUN = base::mean)
+  
+  # Set row names to cluster and remove cluster column
+  base::rownames(cluster_means) <- base::paste0("Cluster ", cluster_means$cluster)
+  cluster_means$cluster <- NULL
+  
+  # Normalize data to 0-1 scale
+  normalize <- function(x) {
+    return((x - base::min(x)) / (base::max(x) - base::min(x)))
+  }
+  
+  normalized_means <- base::as.data.frame(
+    base::apply(cluster_means, 2, normalize)
+  )
+  
+  # Add max and min rows required by fmsb
+  radar_data <- base::rbind(
+    base::rep(1, base::ncol(normalized_means)),  # Max values
+    base::rep(0, base::ncol(normalized_means)),  # Min values
+    normalized_means
+  )
+  
+  # Set color palette
+  colors <- gg_color(k)
+  
+  # Set up plotting layout for RStudio
+  graphics::par(mfrow = c(2, 3), mar = c(1, 1, 3, 1))
+  
+  # Plot each cluster
+  for (i in 1:k) {
+    cluster_name <- base::paste0("Cluster ", i)
+    fmsb::radarchart(
+      radar_data[c(1, 2, i + 2), ],  # Select max, min, and cluster data
+      pcol = colors[i],
+      pfcol = grDevices::adjustcolor(colors[i], alpha.f = 0.5),
+      plwd = 3,
+      cglcol = "grey",
+      cglty = 1,
+      axislabcol = "grey30",
+      vlcex = 1.0,
+      title = base::paste0(cluster_name, " Feature Profile")
+    )
+  }
+  
+  # Reset plotting parameters
+  graphics::par(mfrow = c(1, 1))
+}
+
+# Execute function with your data
+
+create_cluster_radar_charts(
+  data = affiliates,
+  features_to_plot = names(affiliates)[2:8]
+)
+
+create_cluster_radar_charts(
+  data = affiliates,
+  features_to_plot = names(affiliates)[11:15]
+)
+
+create_cluster_radar_charts(
+  data = affiliates,
+  features_to_plot = names(affiliates)[16:19]
+)
+
+create_cluster_radar_charts(
+  data = affiliates,
+  features_to_plot = names(affiliates)[20:23]
+)
+
+
+# 10b. Boxplot: For key variable "num_transa" by cluster (if available)
+if ("num_transa" %in% base::names(affiliates)) {
+  ggplot2::ggplot(affiliates, ggplot2::aes(x = cluster, y = num_transa, fill = cluster)) +
+    ggplot2::geom_boxplot() +
+    ggplot2::labs(title = "Distribución de Num. Transacciones por Clúster", x = "Clúster", y = "Num. Trans.") +
+    ggplot2::theme_minimal() +
+    ggplot2::theme(legend.position = "bottom")
+} else {
+  base::message("Variable 'num_transa' no encontrada; no se crea boxplot.")
+}
+
+if ("Ahorro_Egreso" %in% base::names(affiliates)) {
+  ggplot2::ggplot(affiliates, ggplot2::aes(x = cluster, y = Ahorro_Egreso, fill = cluster)) +
+    ggplot2::geom_boxplot() +
+    ggplot2::labs(title = "Distribución de Transacciones de Ahorro Egreso por Clúster", x = "Clúster", y = "Trans. Ahorro Egreso") +
+    ggplot2::theme_minimal() +
+    ggplot2::theme(legend.position = "bottom")
+} else {
+  base::message("Variable 'num_transa' no encontrada; no se crea boxplot.")
+}
+
+# Define dichotomous variables
+binary_vars <- c("T_Contr_Indef",
+                 "T_Contr_Otro",
+                 "Sec_Econ_Priv",
+                 "Sec_Econ_Pub_Admon",
+                 "Sec_Econ_Pub_Edu",
+                 "Sec_Econ_Pub_Pens",
+                 "Sec_Econ_Pub_Salud",
+                 "Act_Eco_Asalar",
+                 "Act_Eco_Otro")
+
+# 1. Table for binary variables (means)
+binary_table <- affiliates %>%
+  dplyr::select(dplyr::all_of(c("cluster", binary_vars))) %>%
+  dplyr::group_by(cluster) %>%
+  dplyr::summarize(
+    dplyr::across(dplyr::everything(),
+                  ~ base::mean(.x, na.rm = TRUE))
+  ) %>%
+  tidyr::pivot_longer(
+    cols = -cluster,
+    names_to = "variable",
+    values_to = "value"
+  ) %>%
+  tidyr::pivot_wider(
+    names_from = cluster,
+    values_from = value
+  )
+
+# 2. Table for continuous variables (medians)
+continuous_table <- affiliates %>%
+  dplyr::select(-num_identificacion) %>%
+  dplyr::select(-dplyr::all_of(binary_vars)) %>%
+  dplyr::group_by(cluster) %>%
+  dplyr::summarize(
+    dplyr::across(dplyr::everything(),
+                  ~ stats::median(.x, na.rm = TRUE))
+  ) %>%
+  tidyr::pivot_longer(
+    cols = -cluster,
+    names_to = "variable",
+    values_to = "value"
+  ) %>%
+  tidyr::pivot_wider(
+    names_from = cluster,
+    values_from = value
+  )
+
+# 3. Combine tables
+final_table <- dplyr::bind_rows(binary_table, continuous_table) 
+
+# 4. Format output
+knitr::kable(final_table, 
+             caption = "Cluster Statistics: Means for Binary Variables, Medians for Others")
+
+# Calculate median, IQR, and upper-sided 95% CI for each variable by cluster
+alerts <- affiliates %>%
+  dplyr::select(-num_identificacion) %>%
+  dplyr::group_by(cluster) %>%
+  dplyr::summarize(
+    dplyr::across(
+      names(affiliates)[11:23],
+      list(
+        xq3 = ~stats::quantile(.x, probs = 0.75, type = 6, na.rm = TRUE),
+        xiqr = ~stats::IQR(.x, type = 6, na.rm = TRUE),
+        xalert = ~stats::quantile(.x, probs = 0.75, type = 6, na.rm = TRUE) + (1.5 * stats::IQR(.x, type = 6, na.rm = TRUE))
+      )
+    )
+  ) %>%
+  dplyr::ungroup()
+
+# Reshape to have variables as rows and cluster statistics as columns
+alerts <- alerts %>%
+  tidyr::pivot_longer(
+    cols = -cluster,
+    names_to = c("variable", "stat_type"),
+    names_sep = "_x",
+    values_to = "value"
+  ) %>%
+  tidyr::pivot_wider(
+    names_from = c(cluster, stat_type),
+    values_from = value,
+    names_glue = "{cluster}_{stat_type}"
+  )
+
+
+# Print as a formatted table
+knitr::kable(alerts, 
+             caption = "Early Alert System by Cluster")
+
+
 # 13. Save results: Export full segmentation to Excel and save workspace objects
-writexl::write_xlsx(affiliates, "/Users/fsanta/Library/CloudStorage/OneDrive-Personal/SARLAFT_Risk/Fonedh/ROutputs/SARLAFT_Fonedh_Segmentacion_Reporte.xlsx")
-base::save.image("Data/results.RData")
+writexl::write_xlsx(affiliates, "Clients/0001_Fonedh/Model_2023_2024/Results/SARLAFT_Fonedh_Segmentacion_Reporte.xlsx")
+base::save.image("Clients/0001_Fonedh/Model_2023_2024/Results/results.RData")
 
 # Clear environment
 base::rm(list = base::ls())
