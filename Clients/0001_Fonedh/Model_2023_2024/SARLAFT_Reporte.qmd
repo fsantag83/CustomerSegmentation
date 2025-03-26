@@ -30,6 +30,28 @@ execute:
 lang: es
 ---
 
+```{r setup, include=FALSE}
+# Load required libraries (assuming they are installed)
+library(quarto)
+library(rmarkdown)
+library(magrittr)
+
+# Set options for code chunks
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+
+# Path to results.RData
+results_path <- "results/results.RData"
+
+# Load the results
+if (file.exists(results_path)) {
+  load(results_path)
+} else {
+  stop("results.RData not found. Please ensure it is generated first.")
+}
+```
+
+
+
 # 
 
 ![](Images/cover_image.jpg){width="100%"}
@@ -89,3 +111,164 @@ Implementar una metodología de segmentación de contrapartes tales como asociad
 | **ID Asociados** | 3.851 | 2.534* | 
 | -------------------------- | ----------------------- | ----------------------- |
 | **Transacciones** | 512.487 | 482.399* |
+
+# **Preparación de los datos**
+
+Se llevan a cabo los siguientes procedimientos:
+
+- Cruce de bases de datos Asociados y Movimientos.
+- Creación de variables: Monto y frecuencia diferenciado por: asociados, productos, canales y jurisdicciones para periodos mensuales.
+- Selección de variables según requerimientos normativos y aporte a los modelos.
+
+# **Base de datos**
+
+![center](Images/data_structure_schema.png){width="100%"}
+
+# **Análisis exploratorio de datos**
+
+```{r, echo = FALSE, message = FALSE, warning = FALSE}
+create_histogram_matrix(affiliates[,c(11:15)], affiliates_t[,c(11:15)])
+```
+
+# **Análisis exploratorio de datos**
+
+```{r, echo = FALSE, message = FALSE, warning = FALSE}
+create_histogram_matrix(affiliates[,c(16:19)], affiliates_t[,c(16:19)])
+```
+
+# **Análisis exploratorio de datos**
+
+```{r, echo = FALSE, message = FALSE, warning = FALSE}
+create_histogram_matrix(affiliates[,c(20:23)], affiliates_t[,c(20:23)])
+```
+
+# **Análisis de Componentes Principales (PCA)**
+
+```{r, echo = FALSE, message = FALSE, warning = FALSE}
+factoextra::fviz_eig(pca_results, addlabels = TRUE)
+```
+
+# **Análisis de Componentes Principales (PCA)**
+
+```{r, echo = FALSE, message = FALSE, warning = FALSE}
+factoextra::fviz_pca_var(pca_results, col.var = "cos2",
+                         gradient.cols = gg_color(5), 
+                         repel = TRUE # Avoid text overlapping
+)
+```
+
+# **Selección del método de agrupamiento**
+
+```{r, echo = FALSE, message = FALSE, warning = FALSE}
+knitr::kable(final_summary[c(1:10),c(1:5,7)])
+```
+
+# **Selección del método de agrupamiento**
+
+```{r, echo = FALSE, message = FALSE, warning = FALSE}
+knitr::kable(final_summary[c(11:20),c(1:5,7)],row.names = FALSE)
+```
+
+# **Selección del método de agrupamiento**
+
+```{r, echo = FALSE, message = FALSE, warning = FALSE}
+graphics::par(mfrow = c(2, 2), mar = c(1, 1, 2, 1))
+
+# Generate charts for key configurations
+create_fmsb_radar(radar_data, "Pam", 5)
+create_fmsb_radar(radar_data, "Clara", 5)
+create_fmsb_radar(radar_data, "Hierarchical", 5)
+create_fmsb_radar(radar_data, "Hierarchical", 6)
+
+graphics::par(mfrow = c(1, 1), mar = c(1, 1, 2, 1))
+```
+
+# **Agrupamiento**
+
+```{r, echo = FALSE, message = FALSE, warning = FALSE}
+factoextra::fviz_dend(
+  hclust_obj,
+  cex = 0.5,
+  k = k,
+  k_colors = cluster_colors,
+  rect = TRUE
+)
+```
+
+
+# **Agrupamiento**
+
+```{r, echo = FALSE, message = FALSE, warning = FALSE}
+ggpubr::ggscatter(clus_res,
+                  x = "Dim.1", y = "Dim.2", color = "cluster",
+                  repel = FALSE, ellipse = TRUE, ellipse.type = "none",
+                  shape = 19, size = 1, 
+                  xlab = paste0("Dim.1"," (", round(pca_results$eig[1,2],1),"%)"), 
+                  ylab = paste0("Dim.2"," (", round(pca_results$eig[2,2],1),"%)"), 
+                  ggtheme = ggplot2::theme_minimal()) + 
+  ggplot2::geom_hline(ggplot2::aes(yintercept = 0), color = "black", linetype = "dashed") +
+  ggplot2::geom_vline(ggplot2::aes(xintercept = 0), color = "black", linetype = "dashed") +
+  ggplot2::theme(legend.position = "bottom")
+```
+
+# **Agrupamiento**
+
+```{r, echo = FALSE, message = FALSE, warning = FALSE}
+plotrix::pie3D(cluster_counts,
+               labels = labels, explode = 0.1, radius = 0.9, height = 0.05,
+               col = gg_color(k), labelcex = 0.7, main = " "
+)
+```
+
+# **Características de cada segmento**
+
+```{r, echo = FALSE, message = FALSE, warning = FALSE}
+create_cluster_radar_charts(
+  data = affiliates,
+  features_to_plot = names(affiliates)[2:8]
+)
+```
+
+# **Características de cada segmento**
+
+```{r, echo = FALSE, message = FALSE, warning = FALSE}
+create_cluster_radar_charts(
+  data = affiliates,
+  features_to_plot = names(affiliates)[11:15]
+)
+```
+
+# **Características de cada segmento**
+
+```{r, echo = FALSE, message = FALSE, warning = FALSE}
+create_cluster_radar_charts(
+  data = affiliates,
+  features_to_plot = names(affiliates)[16:19]
+)
+```
+
+# **Características de cada segmento**
+
+```{r, echo = FALSE, message = FALSE, warning = FALSE}
+create_cluster_radar_charts(
+  data = affiliates,
+  features_to_plot = names(affiliates)[20:23]
+)
+```
+
+# **Resumen del agrupamiento**
+
+![](Images/summary_table.png){width="100%"}
+
+# **Sistema de alertas**
+
+![](Images/alertas1.png){width="100%"}
+
+# **Sistema de alertas**
+
+![](Images/alertas2.png){width="100%"}
+
+
+# **Sistema de alertas**
+
+![](Images/alertas3.png){width="100%"}
